@@ -6,18 +6,30 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.NetworkInfo
 import android.net.wifi.WifiManager
+import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.*
-import android.os.Build
+import android.os.*
 import androidx.appcompat.app.AppCompatActivity
-import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.widget.*
+import androidx.annotation.RestrictTo
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Dispatchers.IO
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.IOException
-import java.net.Socket
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.*
+import java.util.concurrent.Executors
 
 const val PERMISSIONS_REQUEST_CODE_ACCESS_FINE_LOCATION = 1001
+const val MESSAGE_READ = 1
+var sendReceive: SendReceive? = null
 
 class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
     // wifi peer2peer
@@ -29,12 +41,54 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
         getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager?
     }
     var mChannel: WifiP2pManager.Channel? = null
-    var deviceConnected: WifiP2pDevice? = null
+    var deviceConnected: WifiP2pDevice? = null // TODO: Checar cuando cambia su valor
+    //Socket
+    val socket = Socket()
+    lateinit var serverClass: ServerClass
+    lateinit var clientClass: ClientClass
+
     // otros
     lateinit var list: ListView
     lateinit var txtStatus: TextView
-    val socket = Socket()
     var receiver: BroadcastReceiver? = null
+    var connectionInfoListener = object : WifiP2pManager.ConnectionInfoListener{
+        override fun onConnectionInfoAvailable(info: WifiP2pInfo?) {
+            Log.d("peers", "Conexion info available")
+            if(info==null) return
+            // The owner IP is now known.
+            // TODO: Especificar quien es el owner
+            val groupOwner = info.groupOwnerAddress
+            if (info.groupFormed && info.isGroupOwner) {
+                // Do whatever tasks are specific to the group owner.
+                // One common case is creating a group owner thread and accepting
+                // incoming connections.
+                txtStatus.text = "Host"
+                //TODO: Descomentar
+                /*
+                lifecycleScope.launch{
+                    withContext(Dispatchers.IO) {
+                        serverClass = ServerClass(findViewById(R.id.txtMessageReceived) as TextView)
+                        serverClass.run()
+                    }
+                }*/
+            }else if (info.groupFormed) {
+                // The other device acts as the peer (client). In this case,
+                // you'll want to create a peer thread that connects
+                // to the group owner.
+                txtStatus.text = "Client"
+                //TODO: Descomentar
+                /*deviceConnected = WifiP2pDevice()
+                deviceConnected!!.deviceAddress = groupOwner.hostAddress
+                lifecycleScope.launch{
+                    withContext(Dispatchers.IO) {
+                        clientClass = ClientClass(groupOwner, findViewById(R.id.txtMessageReceived) as TextView)
+                        clientClass.run()
+                    }
+                }*/
+            }
+        }
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,6 +98,7 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
 
         initializeP2PComponents()
         initializeListeners()
+
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
             && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
@@ -129,6 +184,7 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
     private fun connectWithDevice(device: WifiP2pDevice){
         val config = WifiP2pConfig()
         config.deviceAddress = device.deviceAddress
+        config.wps.setup = WpsInfo.PBC
         mChannel?.also { channel ->
             manager?.connect(channel, config, object : WifiP2pManager.ActionListener {
 
@@ -136,6 +192,12 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
                     Log.d("P2P Connection accepted", "Connection with "+device.deviceName)
                     deviceConnected = device
                     Toast.makeText(this@MainActivity, "Conexion exitosa con "+device.deviceName, Toast.LENGTH_LONG).show()
+                    Log.d("peers", "Connect - WIFI_P2P_CONNECTION_CHANGED_ACTION")
+                    // Respond to new connection or disconnections
+                    if (manager == null) {
+                        return
+                    }
+                    manager!!.requestConnectionInfo(channel, connectionInfoListener)
                 }
 
                 override fun onFailure(reason: Int) {
@@ -148,18 +210,16 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
 
     private fun send(){
         try {
-            if(deviceConnected==null){
+            if(deviceConnected==null){ //TODO: Checar esta nuladidad
                 Toast.makeText(this, "Error: Asegurese de conectarse a un dispositivo primero dando clic en el", Toast.LENGTH_SHORT).show()
                 return
             }
             var hostAdd = deviceConnected!!.deviceAddress
+            val msg = findViewById<EditText>(R.id.txtMessage).text.toString()
+            if(sendReceive!=null){
+                sendReceive!!.writeMsg(msg.toByteArray())
+            }
 
-            /*val serviceIntent = Intent(this, MessageTransferService::class.java)
-            serviceIntent.action = "com.example.peertopeerapp.SEND_MESSAGE"
-            serviceIntent.putExtra("EXTRA_MESSAGE", "HOLI")
-            serviceIntent.putExtra("PORT_NUMBER", 8888.toInt())
-            serviceIntent.putExtra("DEVICE_IP", hostAdd)
-            startService(serviceIntent)*/
         } catch (e: IOException) {
             //catch logic
         } finally {
@@ -189,7 +249,16 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
         })
     }
 
-
+    val handler = Handler(object:Handler.Callback {
+        override fun handleMessage(msg: Message): Boolean {
+            if(msg.what == MESSAGE_READ){
+                var readBuff = msg.obj as ByteArray
+                var msgAux = String(readBuff, 0, msg.arg1)
+                findViewById<TextView>(R.id.txtMessageReceived).text = msgAux
+            }
+            return true
+        }
+    })
 
 
     //////////////////////////////////// OVERRIDES ///////////////////////////////////////////////////
@@ -237,17 +306,194 @@ class MainActivity : AppCompatActivity(), WifiP2pManager.PeerListListener {
         }
     }
 
-    /*
-    override fun onConnectionInfoAvailable(info: WifiP2pInfo?) {
-        // The owner IP is now known.
-        // After the group negotiation, we assign the group owner as the file
-        // server. The file server is single threaded, single connection server
-        // socket.
-        if (info!=null && info.groupFormed && info.isGroupOwner) {
-            ServerAsyncTaskClass(
-                this,
-                findViewById<View>(R.id.txtStatus) as TextView
-            ).execute()
+fun isPortAvailable(port: Int): Boolean {
+    try {
+        // Intenta crear un socket en el puerto especificado
+        val socket = ServerSocket(port)
+
+        // Si no se produce una excepción, el puerto está disponible
+        socket.close()
+        return true
+    } catch (e: IOException) {
+        // Si se produce una excepción, el puerto no está disponible
+        return false
+    }
+}
+
+
+
+//////////////////////////// Clases ///////////////////////////////////////
+class ServerClassWithExecutor() :Thread(){
+    lateinit var serverSocket:ServerSocket
+    lateinit var inputStream: InputStream
+    lateinit var  outputStream: OutputStream
+    lateinit var socket: Socket
+
+    override fun run() {
+        try {
+            serverSocket = ServerSocket(8888)
+            socket = serverSocket.accept()
+            inputStream =socket.getInputStream()
+            outputStream = socket.getOutputStream()
+        }catch (ex:IOException){
+            ex.printStackTrace()
         }
-    }*/
+
+        val executors = Executors.newSingleThreadExecutor()
+        val handler = Handler(Looper.getMainLooper())
+        executors.execute(Runnable{
+            kotlin.run {
+                val buffer = ByteArray(1024)
+                var byte:Int
+                while (true){
+                    try {
+                        byte =  inputStream.read(buffer)
+                        if(byte > 0){
+                            var finalByte = byte
+                            handler.post(Runnable{
+                                kotlin.run {
+                                    var tmpMeassage = String(buffer,0,finalByte)
+
+                                    Log.i("Server class","$tmpMeassage")
+                                }
+                            })
+
+                        }
+                    }catch (ex:IOException){
+                        ex.printStackTrace()
+                    }
+                }
+            }
+        })
+    }
+
+    fun write(byteArray: ByteArray){
+        try {
+            Log.i("Server write","$byteArray sending")
+            outputStream.write(byteArray)
+        }catch (ex:IOException){
+            ex.printStackTrace()
+        }
+    }
+}
+
+class ClientClassWithExecutors(hostAddress: InetAddress): Thread() {
+
+    var hostAddress: String = hostAddress.hostAddress
+    lateinit var inputStream: InputStream
+    lateinit var outputStream: OutputStream
+    lateinit var socket: Socket
+
+    fun write(byteArray: ByteArray){
+        try {
+            outputStream.write(byteArray)
+        }catch (ex:IOException){
+            ex.printStackTrace()
+        }
+    }
+
+    override fun run() {
+        try {
+            socket = Socket()
+            socket.connect(InetSocketAddress(hostAddress,8888),500)
+            inputStream = socket.getInputStream()
+            outputStream = socket.getOutputStream()
+        }catch (ex:IOException){
+            ex.printStackTrace()
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        var handler =Handler(Looper.getMainLooper())
+
+        executor.execute(kotlinx.coroutines.Runnable {
+            kotlin.run {
+                val buffer =ByteArray(1024)
+                var byte:Int
+                while (true){
+                    try{
+                        byte = inputStream.read(buffer)
+                        if(byte>0){
+                            val finalBytes = byte
+                            handler.post(Runnable{
+                                kotlin.run {
+                                    val tmpMeassage = String(buffer,0,finalBytes)
+
+                                    Log.i("client class", tmpMeassage)
+                                }
+                            })
+                        }
+                    }catch (ex:IOException){
+                        ex.printStackTrace()
+                    }
+                }
+            }
+        })
+    }
+
+}
+class ServerClass ( //Server Class
+    private var txtMsg: TextView
+) : Thread() {
+    lateinit var serverSocket: ServerSocket
+    lateinit var socket: Socket //cliente
+
+    override fun run(){
+        try {
+            // crear server socket
+            val isAvailable = isPortAvailable(8881) // Verifica si el puerto está disponible
+            if (isAvailable) {
+                Log.d("socket", "Puerto disponible para el server")
+                serverSocket = ServerSocket(8881)
+                serverSocket.use {
+                    socket =serverSocket.accept()
+                    sendReceive = SendReceive(socket, txtMsg)
+                    sendReceive!!.start()
+                }
+            } else {
+                Log.d("socket", "Puerto NO disponible para el server")
+            }
+
+        }catch (e: IOException){
+            e.printStackTrace()
+        }finally {
+
+        }
+    }
+    fun isPortAvailable(port: Int): Boolean {
+        try {
+            // Intenta crear un socket en el puerto especificado
+            val socket = ServerSocket(port)
+
+            // Si no se produce una excepción, el puerto está disponible
+            socket.close()
+            return true
+        } catch (e: IOException) {
+            // Si se produce una excepción, el puerto no está disponible
+            return false
+        }
+    }
+
+
+}
+
+class ClientClass ( //Client Class
+    private val hostAddress: InetAddress,
+    private val txtMsg: TextView
+) : Thread() {
+    lateinit var socket: Socket  //cliente
+
+    override fun run(){
+        try {
+            Log.d("peers", "ClientClass start")
+            socket = Socket()
+            val address = "http://"+ hostAddress.hostAddress.toString()
+            socket.connect(InetSocketAddress(hostAddress.hostAddress.toString(), 8881), 500)
+            sendReceive = SendReceive(socket, txtMsg)
+            sendReceive!!.start()
+        }catch (e: IOException){
+            e.printStackTrace()
+        }finally {
+
+        }
+    }
+    }
 }

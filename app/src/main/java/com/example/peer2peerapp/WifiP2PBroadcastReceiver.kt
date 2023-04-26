@@ -3,7 +3,10 @@ package com.example.peer2peerapp
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.NetworkInfo
 import android.net.wifi.p2p.WifiP2pManager
+import android.os.Parcelable
+import android.util.Log
 import android.widget.Toast
 
 class WifiP2PBroadcastReceiver (
@@ -31,8 +34,9 @@ class WifiP2PBroadcastReceiver (
                 manager?.requestPeers(channel, activity)
             }
             WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
+                Log.d("peers", "WIFI_P2P_CONNECTION_CHANGED_ACTION")
                 // Respond to new connection or disconnections
-                /*if (manager == null) {
+                if (manager == null) {
                     return
                 }
                 val networkInfo = intent
@@ -40,7 +44,8 @@ class WifiP2PBroadcastReceiver (
                 if (networkInfo!!.isConnected) {
                     // we are connected with the other device, request connection
                     // info to find group owner IP
-                    manager.requestConnectionInfo(channel, activity)*/
+                    manager.requestConnectionInfo(channel, activity.connectionInfoListener)
+                }
             }
             WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
                 // Respond to this device's wifi state changing
